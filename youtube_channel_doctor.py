@@ -1,25 +1,46 @@
-# youtube_channel_doctor.py
+# youtube_channel_doctor_v3.py
 
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import matplotlib.pyplot as plt
 
-# ================== Konfigurasi Awal ==================
-st.set_page_config(page_title="📊 Channel Doctor - V1", layout="wide")
-st.title("📊 Channel Doctor - Versi Dasar (V1)")
-st.write("Analisis Channel YouTube: Views, VPH, Lonjakan, dan Video Underperform")
+# === Google Auth untuk OAuth (opsional) ===
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
-# ================== Input API Key & Channel ==================
+# ================== Konfigurasi Awal ==================
+st.set_page_config(page_title="📊 Channel Doctor - V3", layout="wide")
+st.title("📊 Channel Doctor - V3")
+st.write("Analisis Channel YouTube + Diagnosis & Obat Otomatis")
+
+# ================== Sidebar ==================
 st.sidebar.header("⚙️ Pengaturan")
 api_key = st.sidebar.text_input("🔑 Masukkan API Key YouTube Data API v3", type="password")
 channel_input = st.sidebar.text_input("📺 Channel ID / URL / Handle", help="Contoh: UC_x5XG1OV2P6uZZ5FSM9Ttw atau @Google")
 max_results = st.sidebar.slider("Jumlah video yang diambil", 10, 200, 50, 10)
 
-if not api_key or not channel_input:
-    st.warning("⚠️ Masukkan API Key dan Channel ID/Handle dulu di sidebar.")
-    st.stop()
+use_oauth = st.sidebar.checkbox("Gunakan OAuth (YouTube Analytics API)")
+oauth_data = None
+
+# ================== Jika OAuth dipilih ==================
+if use_oauth:
+    st.sidebar.write("📥 Upload file client_secret.json (OAuth)")
+    oauth_file = st.sidebar.file_uploader("Pilih file client_secret.json", type=["json"])
+    if oauth_file:
+        with open("client_secret.json", "wb") as f:
+            f.write(oauth_file.getbuffer())
+        try:
+            SCOPES = ["https://www.googleapis.com/auth/yt-analytics.readonly"]
+            flow = InstalledAppFlow.from_client_secrets_file("client_secret.json", SCOPES)
+            creds = flow.run_local_server(port=0)
+            oauth_data = build("youtubeAnalytics", "v2", credentials=creds)
+            st.success("✅ OAuth berhasil! Anda bisa akses data audience & analytics.")
+        except Exception as e:
+            st.error(f"OAuth gagal: {e}")
+            oauth_data = None
 
 # ================== Fungsi Helper ==================
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
@@ -27,14 +48,13 @@ VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 
 def get_channel_id(input_str):
-    """Konversi handle/URL ke Channel ID"""
-    if input_str.startswith("UC"):  # Sudah Channel ID
+    if input_str.startswith("UC"):  
         return input_str
-    if input_str.startswith("@"):  # Handle
+    if input_str.startswith("@"):  
         url = f"{CHANNELS_URL}?part=id&forHandle={input_str}&key={api_key}"
         resp = requests.get(url).json()
         return resp["items"][0]["id"] if "items" in resp else None
-    if "youtube.com" in input_str:  # URL channel
+    if "youtube.com" in input_str:  
         if "/channel/" in input_str:
             return input_str.split("/channel/")[1]
         if "/@" in input_str:
@@ -74,7 +94,11 @@ def get_video_details(video_ids):
     resp = requests.get(url).json()
     return resp.get("items", [])
 
-# ================== Proses Data ==================
+# ================== Ambil Data Dasar (API Key) ==================
+if not api_key or not channel_input:
+    st.warning("⚠️ Masukkan API Key dan Channel ID/Handle dulu di sidebar.")
+    st.stop()
+
 with st.spinner("Mengambil data channel..."):
     channel_id = get_channel_id(channel_input)
     if not channel_id:
@@ -89,7 +113,7 @@ with st.spinner("Mengambil data channel..."):
     video_ids = get_videos_from_playlist(uploads_playlist, max_results)
     video_data = get_video_details(video_ids)
 
-# ================== DataFrame ==================
+# ================== DataFrame Dasar ==================
 rows = []
 for v in video_data:
     vid = v["id"]
@@ -104,27 +128,25 @@ for v in video_data:
 
 df = pd.DataFrame(rows, columns=["VideoID", "Title", "Published", "Views", "Likes", "Comments", "VPH"])
 
-# ================== Analisis ==================
+# ================== Analisis Dasar ==================
 st.header(f"📺 Analisis Channel: {channel_title}")
 col1, col2, col3 = st.columns(3)
 col1.metric("Total Views", f"{int(channel_stats['viewCount']):,}")
 col2.metric("Subscribers", f"{int(channel_stats.get('subscriberCount',0)):,}")
 col3.metric("Total Videos", f"{int(channel_stats['videoCount']):,}")
 
-# Top Performers
 st.subheader("🔥 Top 10 Video by Views")
 st.dataframe(df.sort_values("Views", ascending=False).head(10))
 
 st.subheader("🚀 Top 10 Video by VPH (Views per Hour)")
 st.dataframe(df.sort_values("VPH", ascending=False).head(10))
 
-# Underperform
 median_views = df["Views"].median()
 underperform = df[df["Views"] < median_views].sort_values("Views")
 st.subheader("📉 Video Underperform (di bawah median views)")
 st.dataframe(underperform.head(10))
 
-# Grafik Lonjakan
+# Grafik Views Timeline
 st.subheader("📈 Lonjakan Views (Video Terbaru)")
 df_sorted = df.sort_values("Published")
 plt.figure(figsize=(10,5))
@@ -134,7 +156,66 @@ plt.ylabel("Views")
 plt.title("Views Per Video (Chronological)")
 st.pyplot(plt)
 
-# ================== Download CSV ==================
+# ================== Diagnosis Otomatis ==================
+st.subheader("🩺 Diagnosis & Resep Channel")
+
+diagnosis = []
+
+# Performa umum
+avg_vph = df["VPH"].mean()
+if avg_vph < 5:
+    diagnosis.append("⚠️ Rata-rata VPH rendah → konten kurang menarik algoritma YouTube. Obat: perbaiki judul/thumbnail & optimasi keyword trending.")
+else:
+    diagnosis.append("✅ VPH sehat → pertahankan pola judul & thumbnail saat ini.")
+
+# Like ratio
+df["LikeRatio"] = df.apply(lambda x: x["Likes"]/x["Views"] if x["Views"] > 0 else 0, axis=1)
+avg_like_ratio = df["LikeRatio"].mean()
+if avg_like_ratio < 0.02:
+    diagnosis.append("⚠️ Like ratio < 2% → engagement rendah. Obat: ajak penonton like/subscribe di video.")
+else:
+    diagnosis.append("✅ Engagement baik → audiens suka konten Anda.")
+
+# Underperform
+if len(underperform) > len(df) * 0.5:
+    diagnosis.append("⚠️ Lebih dari 50% video underperform → mungkin niche terlalu luas. Obat: fokus pada format/topik video yang terbukti sukses.")
+
+# Jumlah upload
+if int(channel_stats["videoCount"]) < 20:
+    diagnosis.append("⚠️ Jumlah video masih sedikit. Obat: konsisten upload min. 2x per minggu.")
+else:
+    diagnosis.append("✅ Produksi konten cukup → fokus pada kualitas & konsistensi.")
+
+# Tampilkan diagnosis
+for d in diagnosis:
+    st.write(d)
+
+# ================== Audience Insight (jika OAuth aktif) ==================
+if oauth_data:
+    st.subheader("🌍 Audience Insight (via YouTube Analytics API)")
+    try:
+        request = oauth_data.reports().query(
+            ids="channel==MINE",
+            startDate="2024-01-01",
+            endDate=datetime.today().strftime("%Y-%m-%d"),
+            metrics="views,estimatedMinutesWatched,averageViewDuration",
+            dimensions="country",
+            sort="-views",
+            maxResults=10
+        )
+        result = request.execute()
+        if "rows" in result:
+            aud_df = pd.DataFrame(result["rows"], columns=["Country", "Views", "MinutesWatched", "AvgDurationSec"])
+            st.dataframe(aud_df)
+
+            # Diagnosis tambahan berdasarkan negara
+            top_country = aud_df.iloc[0]["Country"]
+            st.info(f"🌎 Negara dengan minat tertinggi: **{top_country}** → gunakan judul/thumbnail berbahasa Inggris untuk jangkau audiens global.")
+        else:
+            st.info("Tidak ada data audience detail.")
+    except Exception as e:
+        st.error(f"Gagal mengambil audience insight: {e}")
+
+# ================== Export CSV ==================
 st.subheader("⬇️ Export Data")
 st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), "channel_analysis.csv", "text/csv")
-
